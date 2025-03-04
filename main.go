@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"regexp"
 	"strings"
+	"text/template"
 	"time"
 )
 
@@ -151,12 +152,6 @@ func generateCommitMessage(diff, files, apiKey string) string {
 	}
 
 	prompt := fmt.Sprintf(`
-Analyze this git diff and generate a concise, clear commit message.
-
-Focus on WHY the changes were made (purpose, feature, bugfix) rather than listing WHAT files were modified.
-Format as a short first line (50-72 chars) summarizing the change, then a blank line, then 2-3 bullet points with details if needed.
-Use present tense imperative style ("Add feature" not "Added feature").
-
 Here are the changed files:
 %s
 
@@ -164,9 +159,10 @@ Here is the diff:
 %s
 `, files, diff)
 
-	systemRole := os.Getenv("OPENAI_SYSTEM_ROLE")
-	if systemRole == "" {
-		systemRole = "You are a helpful assistant specializing in analyzing code changes and writing concise, meaningful git commit messages."
+	// Read system prompt from the prompt file
+	systemRole, err := readPromptFile("prompt")
+	if err != nil || systemRole == "" {
+		systemRole = ""
 	}
 
 	// Prepare request
@@ -244,6 +240,27 @@ Here is the diff:
 	fmt.Printf("✅ Message generated in %.2fs\n", elapsed.Seconds())
 
 	return message
+}
+
+func readPromptFile(promptFile string) (string, error) {
+	content, err := os.ReadFile(promptFile)
+	if err != nil {
+		return "", fmt.Errorf("failed to read prompt file: %w", err)
+	}
+	
+	// Parse the prompt as a Go template
+	tmpl, err := template.New("systemprompt").Parse(string(content))
+	if err != nil {
+		return "", fmt.Errorf("failed to parse prompt template: %w", err)
+	}
+	
+	// Execute the template
+	var buf bytes.Buffer
+	if err := tmpl.Execute(&buf, nil); err != nil {
+		return "", fmt.Errorf("failed to execute prompt template: %w", err)
+	}
+	
+	return strings.TrimSpace(buf.String()), nil
 }
 
 func updateCommitMessageFile(message, commitMsgFile string) {
