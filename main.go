@@ -11,13 +11,15 @@ import (
 	"regexp"
 	"strings"
 	"text/template"
-	"time"
+	_ "embed"
 )
 
+//go:embed prompt
+var systemPrompt string
+
 const (
-	maxDiffLines  = 2000
 	skipFlag      = "--no-ai-msg"
-	maxTokens     = 150
+	maxTokens     = 120
 	apiEndpoint = "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
 	model = "gemini-2.0-flash"
 )
@@ -67,31 +69,17 @@ func main() {
 	}
 
 	// Get diff and changed files
-	diff, diffLines := getGitDiff()
+	diff := getGitDiff()
 	if diff == "" {
-		fmt.Println("⚠️ No changes to commit")
 		// No changes to commit
 		os.Exit(0)
 	}
 
 	changedFiles := getChangedFiles()
 
-	// Check if diff is too large
-	if diffLines > maxDiffLines {
-		fmt.Printf("⚠️ Warning: Large diff detected (%d lines)\n", diffLines)
-		fmt.Print("Do you want to generate a commit message anyway? (y/N): ")
-		var response string
-		fmt.Scanln(&response)
-		if !strings.HasPrefix(strings.ToLower(response), "y") {
-			fmt.Println("⏭️ Skipping message generation for large diff")
-			os.Exit(0)
-		}
-	}
-
 	// Generate message
 	message := generateCommitMessage(diff, changedFiles, apiKey)
 	if message != "" {
-		fmt.Println("🤖 Updating commit message file...")
 		updateCommitMessageFile(message, commitMsgFile)
 	}
 }
@@ -121,15 +109,15 @@ func shouldSkip(commitType, commitMsgFile string) bool {
 	return false
 }
 
-func getGitDiff() (string, int) {
+func getGitDiff() string {
 	cmd := exec.Command("git", "diff", "--staged")
 	output, err := cmd.Output()
 	if err != nil {
-		return "", 0
+		return ""
 	}
-	
+
 	diff := string(output)
-	return diff, strings.Count(diff, "\n")
+	return diff
 }
 
 func getChangedFiles() string {
@@ -138,44 +126,78 @@ func getChangedFiles() string {
 	if err != nil {
 		return ""
 	}
-	
+
 	return string(output)
+}
+
+func getCurrentAuthorRecentCommits() string {
+	// Get current author's email
+	emailCmd := exec.Command("git", "config", "user.email")
+	email, err := emailCmd.Output()
+	if err != nil {
+		fmt.Println("⚠️ Couldn't get user email, skipping author commits")
+		return ""
+	}
+	authorEmail := strings.TrimSpace(string(email))
+
+	// Get recent commits by the author
+	cmd := exec.Command("git", "log", "--author="+authorEmail, "--pretty=format:%B", "-n", "20")
+	output, err := cmd.Output()
+	if err != nil {
+		fmt.Println("⚠️ Couldn't fetch recent commits, skipping author commits")
+		return ""
+	}
+
+	// Split by commit boundaries and filter
+	commitMsgs := strings.Split(string(output), "\n\n")
+
+	// Filter to only include messages with more than just a title and optional sign-off-by
+	filteredMsgs := []string{}
+	for _, msg := range commitMsgs {
+		lines := strings.Split(strings.TrimSpace(msg), "\n")
+
+		// Skip if it's just a title or title + sign-off
+		if len(lines) <= 1 || (len(lines) == 2 && strings.HasPrefix(lines[1], "Signed-off-by:")) {
+			continue
+		}
+
+		filteredMsgs = append(filteredMsgs, msg)
+		if len(filteredMsgs) >= 5 {
+			break
+		}
+	}
+
+	return strings.Join(filteredMsgs, "\n\n---\n\n")
 }
 
 func generateCommitMessage(diff, files, apiKey string) string {
 	fmt.Println("🤖 Generating commit message...")
-	startTime := time.Now()
 
-	// Limit diff size to avoid token limits
-	if len(diff) > 4000 {
-		diff = diff[:4000]
-	}
+	// Basic prompt with diff and changed files
+	promptText := fmt.Sprintf(`
+		Here are the changed files:
+		%s
 
-	prompt := fmt.Sprintf(`
-Here are the changed files:
-%s
+		Here is the diff:
+		%s`, files, diff)
 
-Here is the diff:
-%s
-`, files, diff)
-
-	// Read system prompt from the prompt file
-	systemRole, err := readPromptFile("prompt")
-	if err != nil || systemRole == "" {
-		systemRole = ""
+	// Read system prompt from embedded file
+	systemRole, err := readPromptFile()
+	if err != nil {
+		return ""
 	}
 
 	// Prepare request
 	messages := []Message{
 		{Role: "system", Content: systemRole},
-		{Role: "user", Content: prompt},
+		{Role: "user", Content: promptText},
 	}
 
 	requestData := OpenAIRequest{
 		Model:       model,
 		Messages:    messages,
 		MaxTokens:   maxTokens,
-		Temperature: 0.7,
+		Temperature: 0.3,
 	}
 
 	jsonData, err := json.Marshal(requestData)
@@ -236,31 +258,55 @@ Here is the diff:
 		message = matches[1]
 	}
 
-	elapsed := time.Since(startTime)
-	fmt.Printf("✅ Message generated in %.2fs\n", elapsed.Seconds())
+	// Strip markdown code fences if present
+	message = stripMarkdownFences(message)
 
 	return message
 }
 
-func readPromptFile(promptFile string) (string, error) {
-	content, err := os.ReadFile(promptFile)
-	if err != nil {
-		return "", fmt.Errorf("failed to read prompt file: %w", err)
-	}
-	
+func readPromptFile() (string, error) {
 	// Parse the prompt as a Go template
-	tmpl, err := template.New("systemprompt").Parse(string(content))
+	tmpl, err := template.New("systemprompt").Parse(systemPrompt)
 	if err != nil {
 		return "", fmt.Errorf("failed to parse prompt template: %w", err)
 	}
-	
-	// Execute the template
+
+	promptData := struct {
+		LastFiveCommits string
+	}{
+		LastFiveCommits: getCurrentAuthorRecentCommits(),
+	}
+
 	var buf bytes.Buffer
-	if err := tmpl.Execute(&buf, nil); err != nil {
+	if err := tmpl.Execute(&buf, promptData); err != nil {
 		return "", fmt.Errorf("failed to execute prompt template: %w", err)
 	}
-	
+
 	return strings.TrimSpace(buf.String()), nil
+}
+
+func stripMarkdownFences(message string) string {
+	// Check if message starts with markdown code fence
+	if strings.HasPrefix(strings.TrimSpace(message), "```") {
+		lines := strings.Split(message, "\n")
+		if len(lines) <= 1 {
+			// Single line with just the fence, return empty
+			return ""
+		}
+
+		// Remove the first line (opening fence)
+		lines = lines[1:]
+
+		// If the last line is a closing fence, remove it
+		lastIdx := len(lines) - 1
+		if lastIdx >= 0 && strings.TrimSpace(lines[lastIdx]) == "```" {
+			lines = lines[:lastIdx]
+		}
+
+		return strings.TrimSpace(strings.Join(lines, "\n"))
+	}
+
+	return message
 }
 
 func updateCommitMessageFile(message, commitMsgFile string) {
@@ -272,7 +318,7 @@ func updateCommitMessageFile(message, commitMsgFile string) {
 
 	// Combine generated message with existing content
 	newContent := fmt.Sprintf("%s\n\n%s", message, string(existingContent))
-	
+
 	err = os.WriteFile(commitMsgFile, []byte(newContent), 0644)
 	if err != nil {
 		fmt.Printf("❌ Error writing commit message file: %s\n", err)
