@@ -18,7 +18,6 @@ import (
 var systemPrompt string
 
 const (
-	skipFlag      = "--no-ai-msg"
 	maxTokens     = 120
 	apiEndpoint = "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
 	model = "gemini-2.0-flash"
@@ -97,13 +96,6 @@ func shouldSkip(commitType, commitMsgFile string) bool {
 		if contentStr != "" && !strings.HasPrefix(contentStr, "#") {
 			return true
 		}
-	}
-
-	// Check if skip flag is in git arguments
-	psCmd := exec.Command("ps", "-o", "args=", "-p", fmt.Sprintf("%d", os.Getppid()))
-	output, err := psCmd.Output()
-	if err == nil && strings.Contains(string(output), skipFlag) {
-		return true
 	}
 
 	return false
