@@ -2,32 +2,37 @@ package main
 
 import (
 	"bytes"
+	"context"
+	_ "embed"
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"text/template"
-	_ "embed"
+
+	"github.com/urfave/cli/v3"
 )
 
 //go:embed prompt
 var systemPrompt string
 
 const (
-	maxTokens     = 120
+	maxTokens   = 120
 	apiEndpoint = "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
-	model = "gemini-2.0-flash"
+	model       = "gemini-2.0-flash"
 )
 
 type OpenAIRequest struct {
-	Model       string     `json:"model"`
-	Messages    []Message  `json:"messages"`
-	MaxTokens   int        `json:"max_tokens"`
-	Temperature float64    `json:"temperature"`
+	Model       string    `json:"model"`
+	Messages    []Message `json:"messages"`
+	MaxTokens   int       `json:"max_tokens"`
+	Temperature float64   `json:"temperature"`
 }
 
 type Message struct {
@@ -43,43 +48,98 @@ type OpenAIResponse struct {
 	} `json:"choices"`
 }
 
+var rootCmd = &cli.Command{
+	Name:  "commitment",
+	Usage: "Generate commit messages and install git hooks",
+	Action: func(ctx context.Context, cmd *cli.Command) error {
+		if cmd.Args().Len() < 1 {
+			return fmt.Errorf("Error: No commit message file provided")
+		}
+
+		commitMsgFile := cmd.Args().Get(0)
+		commitType := ""
+		if cmd.Args().Len() > 1 {
+			commitType = cmd.Args().Get(1)
+		}
+
+		// Skip in these cases
+		if shouldSkip(commitType, commitMsgFile) {
+			fmt.Println("⚠️ Skipping commit message generation")
+			return nil
+		}
+
+		apiKey := os.Getenv("GEMINI_API_KEY")
+		if apiKey == "" {
+			fmt.Println("⚠️ GEMINI_API_KEY not set, skipping commit message generation")
+			return nil
+		}
+
+		// Get diff and changed files
+		diff := getGitDiff()
+		if diff == "" {
+			// No changes to commit
+			return nil
+		}
+
+		changedFiles := getChangedFiles()
+
+		// Generate message
+		message := generateCommitMessage(diff, changedFiles, apiKey)
+		if message != "" {
+			updateCommitMessageFile(message, commitMsgFile)
+		}
+
+		return nil
+	},
+	Commands: []*cli.Command{
+		{
+			Name:  "install",
+			Usage: "Install as a git commit hook",
+			Aliases: []string{"i"},
+			Action: func(ctx context.Context, cmd *cli.Command) error {
+				// Get the git repository root
+				gitCmd := exec.Command("git", "rev-parse", "--git-dir")
+				output, err := gitCmd.Output()
+				if err != nil {
+					return fmt.Errorf("Failed to get git directory: %w", err)
+				}
+
+				gitDir := strings.TrimSpace(string(output))
+				hookPath := filepath.Join(gitDir, "hooks", "prepare-commit-msg")
+
+				// Get the path to the current executable
+				execPath, err := os.Executable()
+				if err != nil {
+					return fmt.Errorf("Failed to get executable path: %w", err)
+				}
+
+				// Create the hooks directory if it doesn't exist
+				hooksDir := filepath.Join(gitDir, "hooks")
+				if err := os.MkdirAll(hooksDir, 0755); err != nil {
+					return fmt.Errorf("Failed to create hooks directory: %w", err)
+				}
+
+				// Create the hook script
+				hookContent := fmt.Sprintf(`#!/bin/sh
+					# Commit message generator hook
+					%s "$@"
+					`, execPath)
+
+				if err := os.WriteFile(hookPath, []byte(hookContent), 0755); err != nil {
+					return fmt.Errorf("Failed to write hook file: %w", err)
+				}
+
+				fmt.Printf("✅ Commit hook installed at %s\n", hookPath)
+				return nil
+			},
+		},
+	},
+}
+
 func main() {
-	if len(os.Args) < 2 {
-		fmt.Println("Error: No commit message file provided")
+	if err := rootCmd.Run(context.Background(), os.Args); err != nil {
+		log.Fatal(err)
 		os.Exit(1)
-	}
-
-	commitMsgFile := os.Args[1]
-	commitType := ""
-	if len(os.Args) > 2 {
-		commitType = os.Args[2]
-	}
-
-	// Skip in these cases
-	if shouldSkip(commitType, commitMsgFile) {
-		fmt.Println("⚠️ Skipping commit message generation")
-		os.Exit(0)
-	}
-
-	apiKey := os.Getenv("GEMINI_API_KEY")
-	if apiKey == "" {
-		fmt.Println("⚠️ GEMINI_API_KEY not set, skipping commit message generation")
-		os.Exit(0)
-	}
-
-	// Get diff and changed files
-	diff := getGitDiff()
-	if diff == "" {
-		// No changes to commit
-		os.Exit(0)
-	}
-
-	changedFiles := getChangedFiles()
-
-	// Generate message
-	message := generateCommitMessage(diff, changedFiles, apiKey)
-	if message != "" {
-		updateCommitMessageFile(message, commitMsgFile)
 	}
 }
 

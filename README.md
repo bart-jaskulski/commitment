@@ -11,8 +11,7 @@ AI-powered Git commit message generator using Gemini. Automatically creates mean
 
 2. Set up the Git hook:
    ```
-   cp prepare-commit-msg /path/to/your/repo/.git/hooks/
-   chmod +x /path/to/your/repo/.git/hooks/prepare-commit-msg
+   commitment install
    ```
 
 3. Set your Gemini API key:
